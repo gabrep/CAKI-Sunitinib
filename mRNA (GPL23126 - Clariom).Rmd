@@ -1,0 +1,129 @@
+---
+title: "mRNA"
+author: "Gabriel"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+#Pacotes
+```{r setup, include=FALSE}
+library(AnnotationDbi)
+library(dendextend)
+library(EnhancedVolcano)
+library(FactoMineR); library(factoextra)
+library(clariomshumantranscriptcluster.db)
+library(pd.clariom.d.human)
+library(GEOquery)
+library(limma)
+library(oligo)
+library(pheatmap)
+library(sva)
+library(tidyverse)
+library(affycoretools)
+
+### Pacotes
+library(reshape2)
+library(clusterProfiler)
+library(dendextend)
+library(DESeq2)
+library(enrichplot)
+library(fgsea)
+library(GOplot)
+library(org.Hs.eg.db)
+library(pheatmap)
+library(UpSetR)
+library(rstatix)
+library(tidyverse)
+library(usethis)
+```
+
+```{r}
+my_id <- "GSE183140"
+
+geo <- getGEO(my_id)
+gse <- geo[1][[1]]
+
+pdata <- pData(gse)
+pdata <- pdata %>% filter(`cell line:ch1` == "Caki-1")
+  #drug resistance:ch1 é o grupo
+sample_info <- pdata %>% dplyr::select(title, `drug resistance:ch1`)
+
+gse <- gse[,rownames(pdata)]
+
+pdata['cel_file'] <- str_split(pdata$supplementary_file,"/") %>% map_chr(tail,1) #Criar nova coluna (cel_file) contendo o nome do arquivo de cada leitura. Importante para manter a ordem das leituras ao importar os dados de leitura
+
+#Importar com a ordem correta, garantindo que as leituras estao mapeadas para as amostras certas
+gse_celdata <-  read.celfiles(paste0('GSE183140_mRNA/',pdata$cel_file),phenoData=phenoData(gse))
+```
+
+```{r}
+eset <- rma(gse_celdata)
+eset <- annotateEset(eset, pd.clariom.d.human)
+
+oligo::hist(eset)
+```
+
+#Filtros 1
+##Anotação dupla e SYMBOL NA
+```{r}
+anno_gse <- fData(eset)
+anno_gse <- subset(anno_gse, !is.na(SYMBOL))
+
+anno_grouped <- group_by(anno_gse, PROBEID)
+anno_summarized <- dplyr::summarize(anno_grouped, n_of_matches = n_distinct(SYMBOL))
+#Nenhum probe com leitura duplicada, provavelmente devido o metodo de anotacao do affycoretools
+
+eset <- subset(eset, !is.na(fData(eset)$SYMBOL))
+```
+
+##Baixas leituras
+```{r}
+exp_eset <- exprs(eset)
+```
+
+```{r}
+gse_medians <- rowMedians(exp_eset)
+
+hist(gse_medians, 100, freq=F, col='cornsilk')
+abline(v=1.8)
+
+threshold <- apply(eset, 1, function(x) {
+  sum(x > 1.8) >=6
+})
+
+table(threshold)
+
+eset_filtered <- subset(eset, threshold)
+exp_filtered <- exprs(eset_filtered)
+```
+
+##Dendograma e PCA
+```{r}
+dist <- dist(t(exp_filtered))
+hc <- hclust(dist)
+dend <- as.dendrogram(hc)
+
+dend %>% 
+  color_labels(labels=colnames(exp_filtered[,1:3]), col='blue') %>% 
+  color_labels(labels=colnames(exp_filtered[,4:6]), col='darkred') %>% 
+  color_labels(labels=colnames(exp_filtered[,7:9]), col='orange2')%>% 
+  plot()
+
+legend('topright',
+       legend=c('Control', 'Caki Clone 1', 'Caki Clone 2'),
+       col=c('blue', 'darkred', 'orange2'),
+       pch=c(20,20,20))
+```
+
+```{r}
+pca <- PCA(t(exp_filtered), graph = F)
+
+fviz_pca_ind(pca,
+             mean.point=F,
+             geom.ind='point', pointshape=21,
+             fill.ind=pdata$description,
+             addEllipses = T, ellipse.type='confidence')+
+    scale_fill_manual(values=c("blue", 'darkred', "orange2"), labels=c('Clone 1 - Caki resistant', 'Clone 2 - Caki resistante', 'Controle'))+
+  scale_color_manual(values=c("blue", 'darkred', "orange2"), labels=c('Clone 1 - Caki resistant', 'Clone 2 - Caki resistante', 'Controle'))
+```
+
