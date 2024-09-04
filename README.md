@@ -1,2 +1,2 @@
 # CAKI-Sunitinib
-CAKI
+Study of Caki 1 sunitinib resistance cells. mRNA and miRNA profiles.
