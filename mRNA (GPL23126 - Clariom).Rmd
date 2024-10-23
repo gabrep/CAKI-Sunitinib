@@ -58,9 +58,12 @@ gse_celdata <-  read.celfiles(paste0('GSE183140_mRNA/',pdata$cel_file),phenoData
 
 ```{r}
 eset <- rma(gse_celdata)
-eset <- annotateEset(eset, pd.clariom.d.human)
+eset <- annotateEset(eset, pd.clariom.d.human, columns = c('PROBEID', "ENTREZID", "SYMBOL", "GENENAME"))
+
+pd.clariom.d.human@tableInfo
 
 oligo::hist(eset)
+fData(eset) %>% View()
 ```
 
 #Filtros 1
@@ -72,8 +75,19 @@ anno_gse <- subset(anno_gse, !is.na(SYMBOL))
 anno_grouped <- group_by(anno_gse, PROBEID)
 anno_summarized <- dplyr::summarize(anno_grouped, n_of_matches = n_distinct(SYMBOL))
 #Nenhum probe com leitura duplicada, provavelmente devido o metodo de anotacao do affycoretools
+hist(anno_summarized)
 
 eset <- subset(eset, !is.na(fData(eset)$SYMBOL))
+fData(eset) %>% View()
+
+eset <- subset(eset, !grepl("AceView", fData(eset)$GENENAME))
+eset <- subset(eset, !grepl("pseudogene", fData(eset)$GENENAME))
+eset <- subset(eset, !grepl("---", fData(eset)$GENENAME))
+eset
+
+n_occur <- data.frame(table(fData(eset)$SYMBOL))
+n_occur[n_occur$Freq>1,]
+
 ```
 
 ##Baixas leituras
@@ -85,16 +99,18 @@ exp_eset <- exprs(eset)
 gse_medians <- rowMedians(exp_eset)
 
 hist(gse_medians, 100, freq=F, col='cornsilk')
-abline(v=1.8)
+abline(v=2.8)
 
 threshold <- apply(eset, 1, function(x) {
-  sum(x > 1.8) >=6
+  sum(x > 2.8) >=6
 })
 
 table(threshold)
 
 eset_filtered <- subset(eset, threshold)
 exp_filtered <- exprs(eset_filtered)
+
+oligo::hist(eset_filtered)
 ```
 
 ##Dendograma e PCA
@@ -105,25 +121,250 @@ dend <- as.dendrogram(hc)
 
 dend %>% 
   color_labels(labels=colnames(exp_filtered[,1:3]), col='blue') %>% 
-  color_labels(labels=colnames(exp_filtered[,4:6]), col='darkred') %>% 
-  color_labels(labels=colnames(exp_filtered[,7:9]), col='orange2')%>% 
+  color_labels(labels=colnames(exp_filtered[,4:6]), col='orange2') %>% 
+  color_labels(labels=colnames(exp_filtered[,7:9]), col='darkred')%>% 
   plot()
 
 legend('topright',
-       legend=c('Control', 'Caki Clone 1', 'Caki Clone 2'),
-       col=c('blue', 'darkred', 'orange2'),
+       legend=c('Caki parental', 'Caki Clone 1', 'Caki Clone 2'),
+       col=c('blue', 'orange2', 'darkred'),
        pch=c(20,20,20))
 ```
 
 ```{r}
 pca <- PCA(t(exp_filtered), graph = F)
 
+pdf("Figuras/PCA - clones.pdf", width = 6, height = 4)
 fviz_pca_ind(pca,
-             mean.point=F,
+             mean.point=F, 
              geom.ind='point', pointshape=21,
              fill.ind=pdata$description,
              addEllipses = T, ellipse.type='confidence')+
-    scale_fill_manual(values=c("blue", 'darkred', "orange2"), labels=c('Clone 1 - Caki resistant', 'Clone 2 - Caki resistante', 'Controle'))+
-  scale_color_manual(values=c("blue", 'darkred', "orange2"), labels=c('Clone 1 - Caki resistant', 'Clone 2 - Caki resistante', 'Controle'))
+    scale_fill_manual(values=c("orange2", 'darkred', "blue"), labels=c('Clone 1 - Caki resistant', 'Clone 2 - Caki resistant', 'Caki Parental'))+
+  scale_color_manual(values=c("orange2", 'darkred', "blue"), labels=c('Clone 1 - Caki resistant', 'Clone 2 - Caki resistant', 'Caki Parental'))+
+  theme_classic()#+
+  
+dev.off()
+  
+  
+fviz_pca_ind(pca,
+             mean.point=F,
+             geom.ind='point', pointshape=21,
+             fill.ind=pdata$`drug resistance:ch1`,
+             addEllipses = T, ellipse.type='confidence')+
+  theme_classic()
 ```
+
+#DEG
+```{r}
+pdata$Grupo <- str_replace_all(pdata$description, "Gene expression data from *", "")
+
+design <- model.matrix(~0+pdata$Grupo)
+colnames(design) <- c("CakiParental", 'CakiResC1', 'CakiResC2')
+
+contrastMatrix <- makeContrasts(CakiResC1 - CakiParental , CakiResC2 - CakiParental, levels=colnames(design))
+contrastMatrix
+
+fit <- lmFit(eset_filtered, design)
+fit <- contrasts.fit(fit, contrasts = contrastMatrix)
+fit2 <- eBayes(fit)
+
+res_c1 <- topTable(fit2, number = Inf, coef = 1)
+res_c2 <- topTable(fit2, number = Inf, coef = 2)
+
+summary(decideTests(fit2, lfc = 1.5, adjust.method = 'fdr', p.value = 0.05))
+
+res_c1.res <- filter(res_c1, abs(logFC) >=1.5, adj.P.Val <=0.05) %>% dplyr::arrange(dplyr::desc(abs(logFC))) %>% distinct(SYMBOL, .keep_all = T)
+res_c2.res <- filter(res_c2, abs(logFC) >=1.5, adj.P.Val <=0.05) %>% dplyr::arrange(dplyr::desc(abs(logFC))) %>% distinct(SYMBOL, .keep_all = T)
+
+venn <-   BioVenn::draw.venn(list_x = res_c1.res$SYMBOL,
+                   list_y=res_c2.res$SYMBOL, list_z = NULL, x_c = "orange", y_c = 'red',
+                   title = NULL, subtitle = NULL,
+                   xtitle = "Caki clone 1", ytitle = "Caki clone 2", nr_s = 1.5,
+                   output = "pdf", width = 500, height = 500)
+venn$xy
+
+res_c1.xy <- filter(res_c1.res, SYMBOL %in% venn$xy)
+res_c2.xy <- filter(res_c2.res, SYMBOL %in% venn$xy)
+
+
+
+BioVenn::draw.venn(list_x = filter(res_c1.xy, logFC < 0)$SYMBOL,
+                   list_y =filter(res_c2.xy, logFC < 0)$SYMBOL,
+                   list_z = NULL)
+
+```
+
+#Heatmap
+```{r}
+exp_xy <- exp_filtered %>% as.data.frame() %>% filter(rownames(.) %in% res_c1.xy$PROBEID)
+
+pdata$Grupo2 <- c("Parental_1", "Parental_2", "Parental_3", "Caki.1_1", "Caki.1_2", "Caki.1_3", "Caki.2_1", "Caki.2_2", "Caki.2_3")
+colnames(exp_xy) <- pdata$Grupo2
+
+exp_xy <- exp_xy %>% rownames_to_column(var="PROBEID") %>% 
+  left_join(., res_c1.xy[,c(1,3)])
+
+exp_xy <- dplyr::select(exp_xy, "PROBEID", "Caki.1_1", "Caki.1_2", "Caki.1_3", "Parental_1", "Parental_2", "Parental_3", "Caki.2_1", "Caki.2_2", "Caki.2_3", "SYMBOL")
+
+ann <- as.data.frame(colnames(exp_xy[2:10]))
+ann$Cell <- ann$`colnames(exp_xy[2:10])` %>% gsub("_.*", "", .)
+ann <- column_to_rownames(ann, var = "colnames(exp_xy[2:10])")
+
+ann$Cell 
+
+
+pheatmap(exp_xy,
+         cluster_cols = F,
+         scale="row",
+         annotation_col = ann,
+         annotation_colors = list(Cell = c(Caki.1 = "yellow",
+                                           Parental = "green",
+                                           Caki2 = "blue")))
+
+pheatmap(exp_xy[,2:10],
+         border_color = NA,
+         cluster_cols = F, #gaps_col = 4,
+         cluster_rows = T,
+         #treeheight_row = 0,
+         color=colorRampPalette(c('#175290','#55a1fa', 'white','#fe0131', 'darkred'))(100),
+         show_colnames = F,
+         show_rownames = T,
+         labels_row  = exp_xy$SYMBOL,
+         scale="row", 
+         fontsize_row = 7,
+         annotation_col = ann,
+         annotation_colors = list(Cell = c(Caki.1 = "orange",
+                                           Parental = "blue",
+                                           Caki.2 = "darkred")))
+```
+
+#Volcanos
+```{r}
+
+
+EnhancedVolcano(res_c1, x = "logFC", y = "P.Value", lab = res_c1$SYMBOL, 
+                title = "Caki clone 1 vs Parental", subtitle = NULL, caption = NULL,
+                pCutoffCol = "adj.P.Val", pCutoff = 0.05, FCcutoff = 1.5
+                )+
+  theme_classic()+
+  theme(legend.position = 'top',
+        legend.title = element_blank())
+ggsave("Figuras/Volcano_Caki1.svg", width = 6, height = 6, bg='white')
+
+
+EnhancedVolcano(res_c2, x = "logFC", y = "P.Value", lab = res_c1$SYMBOL, 
+                title = "Caki clone 2 vs Parental", subtitle = NULL, caption = NULL,
+                pCutoffCol = "adj.P.Val", pCutoff = 0.05, FCcutoff = 1.5
+                )+
+  theme_classic()+
+  theme(legend.position = 'top',
+        legend.title = element_blank())
+ggsave("Figuras/Volcano_Caki2.pdf", width=6, height= 6, bg='white')
+```
+
+#Barplot
+```{r}
+res.xy <- rbind(
+  res_c1.xy %>% mutate(Clone = "Caki 1") %>% dplyr::select(SYMBOL, logFC, P.Value, adj.P.Val, Clone),
+  res_c2.xy %>% mutate(Clone = "Caki 2") %>% dplyr::select(SYMBOL, logFC, P.Value, adj.P.Val, Clone)
+) %>% 
+  mutate(fc=ifelse(logFC>0, "Up", "Down"))
+
+pdf("Figuras/Barplot.pdf", width = 14, height = 6)
+res.xy %>% ggplot(aes(reorder(SYMBOL, -logFC), logFC, fill=Clone))+
+  geom_col(position = "identity", alpha = .65, color='black')+
+  scale_fill_manual(values=c("orange2", "darkred"))+
+  theme_classic()+
+  ggpubr::rotate_x_text(angle=45)+
+  labs(x=NULL)+
+  theme(legend.position = c(.9, .8),
+        axis.text.y = element_text(size=8, color = 'black'),
+        axis.text.x = element_text(size=10, color = 'black'))+
+  coord_flip()
+
+dev.off()
+
+
+res.xy %>% filter(logFC>0) %>% 
+  mutate(plot = ifelse(Clone == "Caki 1", logFC, logFC*-1)) %>% 
+  ggplot(aes(plot, reorder(SYMBOL, logFC), fill=Clone))+
+  geom_col()+
+  geom_vline(xintercept = 0)+
+  theme_classic()+
+  labs(x="Absolute Fold Change", y=NULL)+
+  scale_fill_manual(values=c("orange2", "darkred"))+
+  theme(axis.text.y = element_text(size=8, color = 'black'),
+        axis.text.x = element_text(size=10, color = 'black'))
+  
+
+
+res.xy %>% filter(logFC<0) %>% 
+  mutate(plot = ifelse(Clone == "Caki 1", logFC, logFC*-1)) %>% 
+  ggplot(aes(plot, reorder(SYMBOL, logFC), fill=Clone))+
+  geom_col()+
+  geom_vline(xintercept = 0)+
+  theme_classic()+
+  labs(x="Absolute Fold Change", y=NULL)+
+  scale_fill_manual(values=c("orange2", "darkred"))+
+  theme(axis.text.y = element_text(size=8, color = 'black'),
+        axis.text.x = element_text(size=10, color = 'black'))
+
+pdf("Figuras/Count degs.pdf", width = 3, height = 3)
+res.xy %>% filter(Clone=='Caki 1') %>% ggplot(aes(fc, fill=fc))+
+  geom_bar(stat='count', position='dodge', width = .75)+
+  stat_count(geom = "text", colour = "white", size = 4, aes(label = ..count..), vjust=1.5)+
+  scale_fill_manual(values=c('#55a1fa', '#fe0131'), guide='none')+
+  theme_classic()+
+  labs(x=NULL, y="DEGs")+
+  coord_cartesian(xlim=c(0.5,2.5), expand = F, ylim=c(0,70))+
+  theme(axis.text = element_text(color='black'))
+dev.off()
+
+```
+
+##maiores variacoes
+```{r}
+res.var <- data.frame(SYMBOL = venn$xy)
+
+res.var <- left_join(res.var, res_c1.xy[,c(3,5,9)])
+res.var <- res.var %>% dplyr::rename(C1_logFC = 2, C1_adj.pval = 3)
+
+res.var <- left_join(res.var, res_c2.xy[,c(3,5,9)])
+res.var <- res.var %>% dplyr::rename(C2_logFC = 4, C2_adj.pval = 5)
+res.var$fc <- ifelse(res.var$C1_logFC > 0, "Up", "Down")
+
+res.var$Var <- res.var$C1_logFC / res.var$C2_logFC
+
+top.var <- slice_max(res.var, order_by = abs(Var), n=20)
+openxlsx::write.xlsx(res.var, file='DEGs Caki.xlsx', asTable = T)
+
+pdf("Figuras/Clones variance.pdf", width = 6, height = 8)
+top.var %>% ggplot(aes(reorder(SYMBOL, abs(Var)), abs(Var), fill=fc))+
+  geom_col()+
+  labs(x=NULL, y="Absolute variance (fold) between Caki clones", title="Top 20 genes with most variance between Caki clones")+
+  theme_classic()+
+  coord_flip()+
+  scale_fill_manual(values=c('#55a1fa', '#fe0131'), name='Fold Change')+
+  theme(axis.text = element_text(size=10, colour = 'black'),
+        legend.position = c(.8,.2))
+dev.off()
+
+```
+
+#Enriquecimento
+```{r}
+xy_GO <- enrichGO(venn$xy, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", ont = 'all')
+xy_GO <- xy_GO@result
+
+xy_down <- enrichGO(gene = filter(res.var, fc == 'Down')$SYMBOL,
+                    OrgDb = org.Hs.eg.db, keyType = "SYMBOL", ont = 'all')
+xy_down <- xy_down@result
+
+xy_up <- enrichGO(gene = filter(res.var, fc == 'Up')$SYMBOL,
+                    OrgDb = org.Hs.eg.db, keyType = "SYMBOL", ont = 'all')
+xy_up <- xy_up@result
+```
+
+
 
