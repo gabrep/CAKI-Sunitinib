@@ -1,0 +1,473 @@
+---
+title: "miRNA (GPL30571 - Affymetrix Rat)"
+author: "Gabriel"
+date: "`r Sys.Date()`"
+output: html_document
+---
+#Pacotes
+```{r}
+library(pd.mirna.4.0)
+library(makecdfenv)
+library(affy)
+library(arrayQualityMetrics)
+```
+
+#Data
+```{r}
+#GEO já carregado na analise de mRNA; é o mesmo GSE com duas plataformas distintas
+gse.mirna <- geo[2][[1]]
+
+pdata.mirna <- pData(gse.mirna)
+pdata.mirna <- pdata.mirna %>% filter(`cell line:ch1` == "Caki-1")
+  #drug resistance:ch1 é o grupo
+sample_info <- pdata %>% dplyr::select(title, `drug resistance:ch1`)
+
+gse.mirna <- gse.mirna[,rownames(pdata.mirna)]
+
+pdata.mirna['cel_file'] <- str_split(pdata.mirna$supplementary_file,"/") %>% map_chr(tail,1) #Criar nova coluna (cel_file) contendo o nome do arquivo de cada leitura. Importante para manter a ordem das leituras ao importar os dados de leitura
+pdata.mirna['cel_file.1'] <- str_split(pdata.mirna$supplementary_file.1,"/") %>% map_chr(tail,1)
+pdata.mirna['cel_file.2'] <- c(pdata.mirna$cel_file[1:3], pdata.mirna$cel_file.1[4], pdata.mirna$cel_file[5:9])
+
+
+#Importar com a ordem correta, garantindo que as leituras estao mapeadas para as amostras certas
+
+gse_celdata.mirna <-  read.celfiles(paste0('GSE183140_miRNA/',pdata.mirna$cel_file.2),phenoData=phenoData(gse.mirna), pkgname = "pd.mirna.4.0")
+
+```
+
+##Eset
+```{r}
+gse_celdata.mirna@annotation
+  #="pd.mirna.4.0"
+rownames(fData(gse_celdata.mirna))
+length(featureNames(gse_celdata.mirna))
+
+eset.mirna <- oligo::rma(gse_celdata.mirna)
+
+fData(eset.mirna) %>% rownames() %>% View()
+length(featureNames(eset.mirna))
+
+fData(eset.mirna) %>% View()
+exprs(eset.mirna) %>% View()
+```
+
+#Anotação
+```{r}
+ann.mirna <- read.csv(file = "miRNA-4_0-st-v1.annotations.20160922.csv", sep=",", skip = 4)
+ann.mirna <- ann.mirna %>% filter(Species.Scientific.Name == "Homo sapiens")
+ann.mirna <- ann.mirna %>% filter(Sequence.Type %in% c("miRNA", "Spike-in controls"))
+
+ann.mirna <- ann.mirna %>% dplyr::select(Probe.Set.ID, Probe.Set.Name, Accession, Transcript.ID.Array.Design., Sequence.Type, Species.Scientific.Name)
+#ann.mirna <- ann.mirna %>% unique()
+
+```
+**ATENÇÃO**
+Foram mantidos apenas miRNA (PROBES) HUMANOS presentes no arquivo de anotação. 6631 probes totais, 2578 miRNAs
+
+##Filtro baixas leituras
+```{r}
+eset.mirna <- subset(eset.mirna, rownames(fData(eset.mirna)) %in% ann.mirna$Probe.Set.Name)
+
+fData(eset.mirna) %>% rownames()
+nrow(fData(eset.mirna))
+dim(eset.mirna)
+
+exp_mirna <- exprs(eset.mirna)
+
+gse_medians_mirna <- rowMedians(exp_mirna)
+
+hist(gse_medians_mirna, 100, freq=F, col='cornsilk')
+abline(v=.6)
+
+threshold <- apply(eset.mirna, 1, function(x) {
+  sum(x > .3) >=7
+})
+
+table(threshold)
+
+eset_filtered.mirna <- subset(eset.mirna, threshold)
+exp_filtered.mirna  <- exprs(eset_filtered.mirna)
+
+oligo::hist(eset_filtered.mirna)
+oligo::boxplot(eset_filtered.mirna)
+
+
+oligo::hist(eset.mirna)
+oligo::boxplot(eset.mirna)
+
+
+arrayQualityMetrics(eset_filtered.mirna)
+```
+
+#Dendograma
+```{r}
+dist <- dist(t(exp_filtered.mirna))
+hc <- hclust(dist)
+dend <- as.dendrogram(hc)
+
+dend %>% 
+  color_labels(labels=colnames(exp_filtered.mirna[,1:3]), col='#440154FF') %>% 
+  color_labels(labels=colnames(exp_filtered.mirna[,4:5]), col='orange2') %>% 
+  color_labels(labels=colnames(exp_filtered.mirna[,6:8]), col='darkred')%>% 
+  plot()
+
+legend('topright',
+       legend=c('Caki parental', 'Caki Clone 1', 'Caki Clone 2'),
+       col=c('#440154FF', 'orange2', 'darkred'),
+       pch=c(20,20,20))
+```
+
+#PCA
+```{r}
+pca.mirna <- PCA(t(exp_filtered.mirna), graph = F)
+
+pdf("Figuras/miRNA/PCA_miRNA.pdf", width = 6, height = 4)
+pca.plot <- fviz_pca_ind(pca.mirna,
+             mean.point=F, 
+             geom.ind='point', pointshape=21,
+             fill.ind=pdata.mirna_filtered$source_name_ch1,
+             addEllipses = T, ellipse.type='confidence')+
+    scale_fill_manual(values=c("#FDE725FF", "#440154FF"), labels=c('Caki Parental', 'Caki Sunitinib Resistant'))+
+  scale_color_manual(values=c("#FDE725FF", "#440154FF"), labels=c('Caki Parental', 'Caki Sunitinib Resistant'))+
+  theme_classic()+
+  theme(legend.position = c(.85,.2))
+dev.off()
+```
+
+#*Outlier*
+Amostra GSM5551940 outlier
+mantendo: 236 miR up-regulated
+```{r}
+pdata.mirna_filtered <- pdata.mirna %>% filter(geo_accession != "GSM5551940")
+
+gse_celdata.mirna <- gse_celdata.mirna[,rownames(pdata.mirna_filtered)]
+```
+!!!!!!!**Correr filtro e eset novamente**
+
+#Heatmap
+```{r}
+temp_ann <- data.frame(pdata.mirna_filtered$description)
+rownames(temp_ann) <- colnames(exp_filtered.mirna)
+colnames(temp_ann) <- "Cell"
+
+temp_ann
+temp_ann$Cell <- str_replace_all(temp_ann$Cell, " +", " ")
+temp_ann
+
+temp_ann$Cell <- str_remove(temp_ann$Cell, "miRNA expression data from")
+temp_ann$Cell <- str_remove(temp_ann$Cell, " ccRCC cell line")
+
+temp_ann
+temp_ann$Cell <- str_trim(temp_ann$Cell)
+
+pheatmap(exp_filtered.mirna,
+         border_color = NA,
+         cluster_cols = T, #gaps_col = 4,
+         cluster_rows = T,
+         treeheight_row = 0,
+         color=colorRampPalette(c("#440154FF", "purple3", 'white' , "orange", "orange3"))(100),
+         #color=colorRampPalette(c(viridis::plasma(100)))(10),
+         show_colnames = F,
+         show_rownames = F,
+         scale="row",
+         annotation_col = temp_ann,
+         annotation_colors = list(Cell = c(`Caki` = "blue", `clone 1 of Caki sunitinib resistant` = 'darkred', `clone 2 of Caki sunitinib resistant` = 'pink')))
+```
+
+
+#DEG
+```{r}
+#Primeiro: celulas caki unidas sem diferenciar entre clones
+pdata.mirna_filtered$Grupo <- temp_ann$Cell
+design <- model.matrix(~0+pdata.mirna_filtered$source_name_ch1)
+design
+
+colnames(design) <- c("CakiParental", 'CakiResistant')
+
+contrastMatrix <- makeContrasts(CakiResistant- CakiParental,
+                                levels=colnames(design))
+
+contrastMatrix
+
+fit <- lmFit(eset_filtered.mirna, design)
+fit <- contrasts.fit(fit, contrasts = contrastMatrix)
+fit2 <- eBayes(fit)
+
+summary(decideTests(fit2, lfc = 2, adjust.method = 'fdr', p.value = 0.05))
+
+
+res.mir <- list()  
+## Salvar o resultado da uniao de clones dentro do mesmo res.mir
+### gerado com a remoção da amostra outlier e considerando tudo como um grupo so
+res.mir$Inter <- topTable(fit2, number = Inf)
+
+
+res.mir$Inter <- rownames_to_column(res.mir$Inter, var="probe")
+
+res.mir$Inter <- left_join(res.mir$Inter, ann.mirna, by=c("probe" = "Probe.Set.Name"))
+
+#Segundo: celulas separadas em clones, salvando em resultados diferentes cada clone
+design <- model.matrix(~0+pdata.mirna_filtered$Grupo)
+design
+colnames(design) <- c("CakiParental", 'CakiResistant_Clone1', 'CakiResistant_Clone2')
+
+contrastMatrix <- makeContrasts(CakiResistant_Clone1 - CakiParental, 
+                                CakiResistant_Clone2 - CakiParental,
+                                levels=colnames(design))
+contrastMatrix
+fit <- lmFit(eset_filtered.mirna, design)
+fit <- contrasts.fit(fit, contrasts = contrastMatrix)
+fit2 <- eBayes(fit)
+summary(decideTests(fit2, lfc = 2, adjust.method = 'fdr', p.value = 0.05))
+
+res.mir.clones  <- list(Clone1=topTable(fit2, number = Inf, coef = 1), Clone2=topTable(fit2, number = Inf, coef = 2))
+
+```
+
+!#Comentario:
+  *-Mantendo os dois clones separados, o clone 1 com a amostra outlier resulta em 200+ miR upregulados. Possivelmente devido alta variação entre amostras (= baixa qualidade do array).
+  *- A interssecção entre todos os miRDEgs de Clone 1 + Clone 2 indica 39 miRDEGs em comum entre clones
+  *- Removendo o outlier do clone 1 e unindo os clones como um unico grupo (celulas resistentes), temos 32 Down e 77 Up mirDEGs 
+      #todos com |logFC| >= 2
+      
+
+#Volcano
+```{r}
+viridis::viridis(n=10)
+
+keyvals <- ifelse(res.mir$Inter$adj.P.Val >= 0.05, "gray",
+                  ifelse(res.mir$Inter$logFC <= -2, "#440154FF",
+                         ifelse(res.mir$Inter$logFC >= 2, "#FDE725FF", "gray")))
+
+keyvals[is.na(keyvals)] <- "gray"
+names(keyvals)[keyvals == "#FDE725FF"] <- "Up-regulated"
+names(keyvals)[keyvals == "gray"] <- "Not significant"
+names(keyvals)[keyvals == "#440154FF"] <- "Down-regulated"
+
+volcano.plot <- EnhancedVolcano(res.mir$Inter,
+                x='logFC', FCcutoff = 2,
+                y="P.Value", pCutoff = 0.05, pCutoffCol = "adj.P.Val",
+                lab=res.mir$Inter$Transcript.ID.Array.Design.,
+                pointSize = 4, #drawConnectors = T, max.overlaps = 10,
+                title=NULL, subtitle = NULL, caption = NULL,
+                colCustom = keyvals)+
+  theme_classic()+
+  theme(legend.position = 'top',
+        legend.title = element_blank())
+ggsave("Figuras/miRNA/Volcano_miRDegs.pdf", width=6, height= 6, bg='white')
+```
+
+#Barplot miDEGs
+```{r}
+mirdegs.plot <- res.mir$Inter %>% filter(abs(logFC) >=2, adj.P.Val < 0.05) %>% 
+  mutate(fc= ifelse(logFC >=2, 'Up', "Down")) %>% 
+  ggplot(aes(fc, fill=fc))+
+  geom_bar(stat='count', width=.75)+
+  scale_fill_manual(values=c("#440154FF" ,"#FDE725FF"), guide='none')+
+  stat_count(geom = "text", colour = c("white", 'black'), size = 4, aes(label = ..count..), vjust=1.5)+
+  coord_cartesian(xlim=c(0.5,2.5), expand = F, ylim=c(0,85))+
+  labs(x=NULL, y='DEmiRs')+
+  theme_classic()+
+  theme(axis.text = element_text(color='black'))
+ggsave("Figuras/miRNA/barplot mirDegs.pdf", width = 3, height = 3)
+```
+
+#Alvos
+```{r}
+library(multiMiR)
+res.mir_sig <- res.mir$Inter %>% filter(abs(logFC) >=2, adj.P.Val < 0.05)
+```
+
+#mirTarBase
+```{r}
+#mirtar <- openxlsx::read.xlsx("../miRTarBase-hsa_MTI.xlsx")
+mirtar <- mirtar %>% dplyr::select(miRTarBase.ID, miRNA, Target.Gene, `Target.Gene.(Entrez.ID)`, `Species.(miRNA)`)
+mirtar <- unique(mirtar)
+
+targets.mirtar <- mirtar %>% filter(miRNA %in% res.mir_sig$Transcript.ID.Array.Design.)
+unique(targets.mirtar$Target.Gene)
+
+#Cruzar com DEGs
+targets.mirtar <- targets.mirtar %>% filter(Target.Gene %in% res.xy$SYMBOL)
+targets.mirtar <- left_join(targets.mirtar, res.xy[,c(1,6)], by=c("Target.Gene"="SYMBOL")) %>% unique()
+
+res.mir_sig <- res.mir_sig %>% mutate(fc_mir = ifelse(logFC < 0, "Down", "Up"))
+targets.mirtar <- left_join(targets.mirtar, res.mir_sig[,c(10,13)], by=c("miRNA"="Transcript.ID.Array.Design."))
+
+table(targets.mirtar$miRNA)
+table(targets.mirtar$Target.Gene)
+
+openxlsx::write.xlsx(targets.mirtar, file="Figuras/miRNA/Targets-miR e DEGs.xlsx")
+
+```
+
+
+```{r}
+rede.png <- magick::image_read("Figuras/miRNA/Rede.png")
+rede.png <- ggplotify::as.grob(rede.png)
+esquema.png <- magick::image_read("Figuras/miRNA/esquema.png")
+esquema.png <- ggplotify::as.grob(esquema.png)
+
+
+ggarrange(
+  #Primeira linha
+  ggarrange(pca.plot, volcano.plot, labels=c("A", "B"), ncol=2, nrow=1),
+  
+  #Segunda linha
+  ggarrange(mirdegs.plot, esquema.png, labels=c("C", "D"), ncol=2, nrow=1, widths = c(0.75, 1.25)),
+  
+  #Terceira linha
+  rede.png, labels = c(" ", " ", "E"), heights = c(1, .5, 1.5),
+ncol=1, nrow=3)
+ggsave("Figuras/miRNA/Painel_2.pdf", width = 190, height = 230, units = 'mm')
+
+library(cowplot)
+plot_grid(
+  plot_grid(pca.plot, volcano.plot, ncol=2, nrow=1),
+  plot_grid(mirdegs.plot, esquema.png,ncol=2, nrow=1),
+  rede.png,
+  ncol=1, nrow=3)
+
+plot_grid(
+  plot_grid(pca.plot, volcano.plot, ncol=2, nrow=1, rel_widths = c(.75,1.25)),
+  plot_grid(mirdegs.plot, esquema.png,ncol=2, nrow=1),
+  ncol=1, nrow=2)
+
+ggarrange(
+  ggarrange(
+    #Primeira linha
+    pca.plot, volcano.plot, 
+            #Subplot
+                  ggarrange(mirdegs.plot, esquema.png, ncol=1, nrow=2), ncol=3, nrow=1, widths = c(1.2,1.2,0.8)),
+          rede.png, ncol=1, nrow=2, heights = c(.6, 1.4))
+```
+
+
+#autophagy
+```{r}
+mirtar %>% filter(Target.Gene %in% res.autophagy$SYMBOL) %>% filter(.$miRNA %in% res.mir_sig$Transcript.ID.Array.Design.) %>% left_join(., dplyr::select(res.mir_sig, logFC, Transcript.ID.Array.Design.), by=c("miRNA"="Transcript.ID.Array.Design.")) %>% mutate(reg=ifelse(logFC >0, "up", "down")) %>% openxlsx::write.xlsx("deMIR-Autophagy DEG.xlsx")
+```
+
+
+
+#CLONES SEPARADOS
+```{r}
+      
+```{r}
+#intersecção entre deMIRs clone 1 e clone 2
+res.mir.clones
+```
+
+```{r}
+res.mir.clones$Clone1 <- rownames_to_column(res.mir.clones$Clone1, var="probe")
+res.mir.clones$Clone2 <- rownames_to_column(res.mir.clones$Clone2, var="probe")
+
+res.mir.clones$Clone1 <- left_join(res.mir.clones$Clone1, ann.mirna, by=c("probe" = "Probe.Set.Name"))
+res.mir.clones$Clone2 <- left_join(res.mir.clones$Clone2, ann.mirna, by=c("probe" = "Probe.Set.Name"))
+
+venn.demirs <- BioVenn::draw.venn(list_x = filter(res.mir.clones$Clone1, adj.P.Val <0.05 & abs(logFC) >=2)$probe,
+                   list_y = filter(res.mir.clones$Clone2, adj.P.Val <0.05 & abs(logFC) >=2)$probe,
+                   list_z = NULL,
+                   x_c = 'purple', y_c = 'yellow',
+                   title = NULL, subtitle = NULL,
+                   xtitle = "Caki clone 1", ytitle = "Caki clone 2", nr_s = 1.5,
+                   output = "pdf", width = 500, height = 500)
+
+
+demirs.clones <- inner_join(res.mir.clones$Clone1 %>% filter(abs(logFC) > 2, adj.P.Val < 0.05),
+  res.mir.clones$Clone2  %>% filter(abs(logFC) > 2, adj.P.Val < 0.05),
+  join_by(Transcript.ID.Array.Design.)) %>% 
+  
+  mutate(reg.x = ifelse(logFC.x < 0, 'down', 'up'),
+         reg.y = ifelse(logFC.y < 0, 'down', 'up'))
+
+all(demirs.clones$reg.x == demirs.clones$reg.y)
+```
+
+```{r}
+pdf("Figuras/miRNA/Clones/PCA_miRNA.pdf", width = 6, height = 4)
+ 
+fviz_pca_ind(pca.mirna,
+             mean.point=F, 
+             geom.ind='point', pointshape=21,
+             fill.ind=pdata.mirna_filtered$Grupo,
+             addEllipses = T, ellipse.type='confidence')+
+    scale_fill_manual(values=c("#FDE725FF", 'darkgreen', "#440154FF"), labels=c('Caki Parental', 'Clone 1 - Caki resistant', 'Clone 2 - Caki resistant'))+
+  scale_color_manual(values=c("#FDE725FF", 'darkgreen', "#440154FF"), labels=c('Caki Parental', 'Clone 1 - Caki resistant', 'Clone 2 - Caki resistant'))+
+  theme_classic()
+dev.off()
+```
+
+```{r}
+viridis::viridis(n=10)
+
+keyvals <- ifelse(res.mir.clones$Clone1$adj.P.Val >= 0.05, "gray",
+                  ifelse(res.mir.clones$Clone1$logFC <= -2, "#440154FF",
+                         ifelse(res.mir.clones$Clone1$logFC >= 2, "#FDE725FF", "gray")))
+
+keyvals[is.na(keyvals)] <- "gray"
+names(keyvals)[keyvals == "#FDE725FF"] <- "Up-regulated"
+names(keyvals)[keyvals == "gray"] <- "Not significant"
+names(keyvals)[keyvals == "#440154FF"] <- "Down-regulated"
+
+EnhancedVolcano(res.mir.clones$Clone1,
+                x='logFC', FCcutoff = 2,
+                y="P.Value", pCutoff = 0.05, pCutoffCol = "adj.P.Val",
+                lab=res.mir$Inter$Transcript.ID.Array.Design.,
+                pointSize = 4, #drawConnectors = T, max.overlaps = 10,
+                title='DEmiRs Caki Clone 1 vs Parental', subtitle = NULL, caption = NULL,
+                colCustom = keyvals)+
+  theme_classic()+
+  theme(legend.position = 'top',
+        legend.title = element_blank())+
+  coord_cartesian(ylim = c(0,10))
+ggsave("Figuras/miRNA/Clones/Volcano_miRDegs-Clone 1.pdf", width=6, height= 6, bg='white')
+
+
+EnhancedVolcano(res.mir.clones$Clone2,
+                x='logFC', FCcutoff = 2,
+                y="P.Value", pCutoff = 0.05, pCutoffCol = "adj.P.Val",
+                lab=res.mir$Inter$Transcript.ID.Array.Design.,
+                pointSize = 4, #drawConnectors = T, max.overlaps = 10,
+                title='DEmiRs Caki Clone 2 vs Parental', subtitle = NULL, caption = NULL,
+                colCustom = keyvals)+
+  theme_classic()+
+  theme(legend.position = 'top',
+        legend.title = element_blank())+
+  coord_cartesian(ylim = c(0,10))
+ggsave("Figuras/miRNA/Clones/Volcano_miRDegs-Clone 2.pdf", width=6, height= 6, bg='white')
+```
+
+```{r}
+demirs.clones %>% 
+  ggplot(aes(reg.x, fill=reg.x))+
+  geom_bar(stat='count', width=.75)+
+  scale_fill_manual(values=c("#440154FF" ,"#FDE725FF"), guide='none')+
+  stat_count(geom = "text", colour = c("white", 'black'), size = 4, aes(label = ..count..), vjust=1.5)+
+  coord_cartesian(xlim=c(0.5,2.5), expand = F, ylim=c(0,60))+
+  labs(x=NULL, y='DEmiRs')+
+  theme_classic()+
+  theme(axis.text = element_text(color='black'))
+ggsave("Figuras/miRNA/Clones/barplot mirDegs.pdf", width = 3, height = 3)
+
+
+```
+
+##Alvos para clones separados
+```{r}
+targets.clones <- mirtar %>% filter(miRNA %in% demirs.clones$Transcript.ID.Array.Design.)
+unique(targets.mirtar$Target.Gene)
+
+#Cruzar com DEGs
+targets.clones <- targets.clones %>% filter(Target.Gene %in% res.xy$SYMBOL)
+targets.clones <- left_join(targets.clones, res.xy[,c(1,6)], by=c("Target.Gene"="SYMBOL")) %>% unique()
+
+res.mir_sig <- res.mir_sig %>% mutate(fc_mir = ifelse(logFC < 0, "Down", "Up"))
+targets.clones <- left_join(targets.clones, res.mir_sig[,c(10,13)], by=c("miRNA"="Transcript.ID.Array.Design."))
+
+table(targets.clones$miRNA)
+table(targets.clones$Target.Gene)
+
+openxlsx::write.xlsx(targets.clones, file="Figuras/miRNA/Targets-miR de ambos os clones e DEGs.xlsx")
+```
+

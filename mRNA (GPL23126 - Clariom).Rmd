@@ -57,7 +57,10 @@ gse_celdata <-  read.celfiles(paste0('GSE183140_mRNA/',pdata$cel_file),phenoData
 ```
 
 ```{r}
+gse_celdata@annotation
 eset <- rma(gse_celdata)
+
+fData(eset)
 eset <- annotateEset(eset, pd.clariom.d.human, columns = c('PROBEID', "ENTREZID", "SYMBOL", "GENENAME"))
 
 pd.clariom.d.human@tableInfo
@@ -132,7 +135,9 @@ legend('topright',
 ```
 
 ```{r}
-pca <- PCA(t(exp_filtered), graph = F)
+pca <- PCA(t(exp_filtered), graph = T)
+
+
 
 pdf("Figuras/PCA - clones.pdf", width = 6, height = 4)
 fviz_pca_ind(pca,
@@ -142,7 +147,9 @@ fviz_pca_ind(pca,
              addEllipses = T, ellipse.type='confidence')+
     scale_fill_manual(values=c("orange2", 'darkred', "blue"), labels=c('Clone 1 - Caki resistant', 'Clone 2 - Caki resistant', 'Caki Parental'))+
   scale_color_manual(values=c("orange2", 'darkred', "blue"), labels=c('Clone 1 - Caki resistant', 'Clone 2 - Caki resistant', 'Caki Parental'))+
-  theme_classic()#+
+  theme_classic()#+]
+
+fviz_contrib(X = pca, choice = 'var')
   
 dev.off()
   
@@ -172,18 +179,18 @@ fit2 <- eBayes(fit)
 res_c1 <- topTable(fit2, number = Inf, coef = 1)
 res_c2 <- topTable(fit2, number = Inf, coef = 2)
 
-summary(decideTests(fit2, lfc = 1.5, adjust.method = 'fdr', p.value = 0.05))
+summary(decideTests(fit2, lfc = 1.5, adjust.method = 'fdr', p.value = 0.05, coef=1))
 
 res_c1.res <- filter(res_c1, abs(logFC) >=1.5, adj.P.Val <=0.05) %>% dplyr::arrange(dplyr::desc(abs(logFC))) %>% distinct(SYMBOL, .keep_all = T)
 res_c2.res <- filter(res_c2, abs(logFC) >=1.5, adj.P.Val <=0.05) %>% dplyr::arrange(dplyr::desc(abs(logFC))) %>% distinct(SYMBOL, .keep_all = T)
 
-venn <-   BioVenn::draw.venn(list_x = res_c1.res$SYMBOL,
+venn <- BioVenn::draw.venn(list_x = res_c1.res$SYMBOL,
                    list_y=res_c2.res$SYMBOL, list_z = NULL, x_c = "orange", y_c = 'red',
                    title = NULL, subtitle = NULL,
                    xtitle = "Caki clone 1", ytitle = "Caki clone 2", nr_s = 1.5,
                    output = "pdf", width = 500, height = 500)
 venn$xy
-
+venn
 res_c1.xy <- filter(res_c1.res, SYMBOL %in% venn$xy)
 res_c2.xy <- filter(res_c2.res, SYMBOL %in% venn$xy)
 
@@ -311,7 +318,8 @@ res.xy %>% filter(logFC<0) %>%
         axis.text.x = element_text(size=10, color = 'black'))
 
 pdf("Figuras/Count degs.pdf", width = 3, height = 3)
-res.xy %>% filter(Clone=='Caki 1') %>% ggplot(aes(fc, fill=fc))+
+res.xy %>% filter(Clone=='Caki 1') %>% #filter apenas para nao repetir cada resultado para cada clone. clones estao iguais
+  ggplot(aes(fc, fill=fc))+
   geom_bar(stat='count', position='dodge', width = .75)+
   stat_count(geom = "text", colour = "white", size = 4, aes(label = ..count..), vjust=1.5)+
   scale_fill_manual(values=c('#55a1fa', '#fe0131'), guide='none')+
@@ -366,5 +374,111 @@ xy_up <- enrichGO(gene = filter(res.var, fc == 'Up')$SYMBOL,
 xy_up <- xy_up@result
 ```
 
+Enriquecimento dos clones de forma separada para encontrar resultados de autofagia
+```{r}
+##Dfs com os valores de cada clone, independentes
+#res_c1.res
+#res_c2.res
+```
 
+##GSEA
+```{r}
+
+##Preparo
+
+ranks.c1 <- res_c1.res[order(res_c1.res$logFC, decreasing = T),]$logFC
+names(ranks.c1) <- res_c1.res[order(res_c1.res$logFC, decreasing = T),]$SYMBOL
+
+ranks.c2 <- res_c2.res[order(res_c2.res$logFC, decreasing = T),]$logFC
+names(ranks.c2) <- res_c2.res[order(res_c2.res$logFC, decreasing = T),]$SYMBOL
+
+msigdbr::msigdbr_collections() %>% print(n=Inf)
+H <- msigdbr::msigdbr(species = "Homo sapiens", category = "H")
+H.symbol <- dplyr::select(H, gs_name, gene_symbol)
+
+CPs <- rbind(
+   msigdbr::msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:KEGG"),
+   msigdbr::msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:REACTOME"),
+   msigdbr::msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:WIKIPATHWAYS"))
+CPs.symbol <- dplyr::select(CPs, gs_name, gene_symbol)
+
+
+##Enriquecimento
+gsea.hallmarks_c1 <- GSEA(ranks.c1, TERM2GENE = H.symbol)
+gsea.hallmarks.c1 <- gsea.hallmarks_c1@result
+
+gsea.cps_c1 <- GSEA(ranks.c1, TERM2GENE = CPs.symbol)
+gsea.cps.c1 <- gsea.cps_c1@result
+
+gsea.hallmarks_c2 <- GSEA(ranks.c2, TERM2GENE = H.symbol)
+gsea.hallmarks.c2 <- gsea.hallmarks_c2@result
+
+gsea.cps_c2 <- GSEA(ranks.c2, TERM2GENE = CPs.symbol)
+gsea.cps.c2 <- gsea.cps_c2@result
+```
+
+
+#GO
+```{r}
+go.c1_up <- enrichGO(filter(res_c1.res, logFC > 0)$SYMBOL, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", ont = "bp")
+go.c1_up <- go.c1_up@result
+
+go.c1_down <- enrichGO(filter(res_c1.res, logFC < 0)$SYMBOL, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", ont="bp")
+go.c1_down <- go.c1_down@result
+
+go.c2_up <- enrichGO(filter(res_c2.res, logFC > 0)$SYMBOL, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", ont = "bp")
+go.c2_up <- go.c2_up@result
+
+go.c2_down <- enrichGO(filter(res_c2.res, logFC < 0)$SYMBOL, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", ont="bp")
+go.c2_down <- go.c2_down@result
+```
+
+```{r}
+mapIds(org.Hs.eg.db, keys = res_c1.res$SYMBOL,
+       column = "ENTREZID", keytype = "SYMBOL")
+
+enrichKEGG(mapIds(org.Hs.eg.db, 
+                  keys = filter(res_c2.res, logFC > 0)$SYMBOL,
+                  column = "ENTREZID", keytype = "SYMBOL"), 
+           organism = "hsa", keyType = "kegg")
+```
+
+#Autophagy
+```{r}
+autophagy <- readxl::read_excel("AutophagyDb.xlsx")
+autophagy <- autophagy[grepl("\\d", autophagy$`  A  (top)`),]
+colnames(autophagy) <- c("geneID", "Name", "Symbol")
+
+BioVenn::draw.venn(list_x = res_c2$SYMBOL,
+                   list_y=autophagy$Symbol, list_z = NULL, x_c = "orange", y_c = 'red',
+                   title = NULL, subtitle = NULL,
+                   xtitle = "Caki clone 1", ytitle = "Autophagy", nr_s = 1.5)
+                   #output = "pdf", width = 500, height = 500)
+
+      
+res.autophagy <- rbind(
+  res_c1.res %>% mutate(Clone = "Caki 1") %>% dplyr::select(SYMBOL, logFC, P.Value, adj.P.Val, Clone) %>%
+    filter( SYMBOL %in% c("NRG1",     "NPC1","EGFR", "CDKN1B",  "PINK1" ,   "MYC" ,     "DAPK1",    "EIF4EBP1", "ATG4A" )),
+  res_c2.res %>% mutate(Clone = "Caki 2") %>% dplyr::select(SYMBOL, logFC, P.Value, adj.P.Val, Clone) %>% 
+    filter(SYMBOL %in% c("ERN1" ,    "NRG1",     "MAP1LC3C", "PPP1R15A", "ATG4A",    "SERPINA1", "CASP4",    "DDIT3" ))
+) %>% 
+  mutate(fc=ifelse(logFC>0, "Up", "Down"))
+
+
+res.autophagy %>% ggplot(aes(as.factor(Clone), reorder(SYMBOL, logFC), fill=logFC))+
+  geom_tile()+
+  scale_fill_gradient2(low = "red", mid = 'white', high = 'deepskyblue4')+
+  #scale_fill_gradientn(colours = c("red",  "white","deepskyblue"))+
+  coord_fixed()+
+  labs(y=NULL, x=NULL)+
+  #geom_text(aes(label=round(adj.P.Val,4)))+
+  theme_classic()+
+  ggpubr::rotate_x_text(angle=90)+
+  theme(axis.text = element_text(size=12, color='black'))
+```
+
+```{r}
+mirtar %>% filter(miRNA %in% c("hsa-miR-23b-3p", "hsa-miR-133a-3p", "hsa-miR-133a-5p")) %>% openxlsx::write.xlsx(., "Alvos_133a_23b.xlsx")
+
+```
 
